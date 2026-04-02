@@ -47,9 +47,9 @@ func main() {
 	// query := schema.UserMessage("读取 模拟出题.csv 中的表格内容，规范格式将题目、答案、解析、选项放在同一行，简答题只把答案写入解析即可")
 	// query := schema.UserMessage("Read the table content in the 模拟出题.csv, put the question, answer, resolution and options in the same line in a standardized format, and simply write the answer into the resolution")
 
-	query := schema.UserMessage("请帮我将 questions.csv 表格中的第一列提取到一个新的 csv 中")
+	// query := schema.UserMessage("请帮我将 questions.csv 表格中的第一列提取到一个新的 csv 中")
 	// query := schema.UserMessage("Please help me extract the first column in question.csv table into a new csv")
-
+	query := schema.UserMessage("请帮我在网上搜索深圳明天天气")
 	ctx := context.Background()
 
 	traceCloseFn, startSpanFn := trace.AppendCozeLoopCallbackIfConfigured(ctx)
