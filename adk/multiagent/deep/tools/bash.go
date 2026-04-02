@@ -62,7 +62,9 @@ type shellInput struct {
 	Command string `json:"command"`
 }
 
+// 接口只有两个方法：Info() 返回描述，InvokableRun() 执行逻辑
 func (b *bashTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	//  1. 解析 Json 参数
 	input := &shellInput{}
 	err := json.Unmarshal([]byte(argumentsInJSON), input)
 	if err != nil {
@@ -72,6 +74,7 @@ func (b *bashTool) InvokableRun(ctx context.Context, argumentsInJSON string, opt
 		return "command cannot be empty", nil
 	}
 	o := tool.GetImplSpecificOptions(&options{b.op}, opts...)
+	// 2. 通过 Operator 执行
 	cmd, err := o.op.RunCommand(ctx, []string{input.Command})
 	if err != nil {
 		if strings.HasPrefix(err.Error(), "internal error") {
@@ -79,5 +82,6 @@ func (b *bashTool) InvokableRun(ctx context.Context, argumentsInJSON string, opt
 		}
 		return "", err
 	}
+	// 3. 格式化返回
 	return utils.FormatCommandOutput(cmd), nil
 }
