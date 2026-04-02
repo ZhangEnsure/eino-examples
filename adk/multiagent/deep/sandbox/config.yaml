@@ -1,0 +1,14 @@
+# 腾讯云AGS配置
+tencent:
+  ags:
+    secret_id: ""   # 通过环境变量 SANDBOX_SECRET_ID 注入
+    secret_key: ""  # 通过环境变量 SANDBOX_SECRET_KEY 注入
+    region: "ap-guangzhou"
+  cos:
+    bucket: ""      # 通过环境变量 SANDBOX_COS_BUCKET 注入
+    region: "ap-guangzhou"
+    prefix: "sandbox-tasks"
+
+# 沙箱配置（每次请求创建新实例，完成后自动销毁）
+sandbox:
+  tool_id: ""  # 通过环境变量 SANDBOX_TOOL_ID 注入

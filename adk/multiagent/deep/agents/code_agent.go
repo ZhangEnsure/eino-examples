@@ -82,14 +82,13 @@ Notice:
 			if !ok {
 				return nil, fmt.Errorf("work dir not found")
 			}
-
+			// 注入了工作目录、用户查询和当前时间
 			tpl := prompt.FromMessages(schema.Jinja2,
 				schema.SystemMessage(instruction),
 				schema.UserMessage(`WorkingDirectory: {{ working_dir }}
 UserQuery: {{ user_query }}
 CurrentTime: {{ current_time }}
 `))
-
 			msgs, err := tpl.Format(ctx, map[string]any{
 				"working_dir":  wd,
 				"user_query":   utils.FormatInput(input.Messages),

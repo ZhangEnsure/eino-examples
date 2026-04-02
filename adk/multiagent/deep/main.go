@@ -49,7 +49,8 @@ func main() {
 
 	// query := schema.UserMessage("请帮我将 questions.csv 表格中的第一列提取到一个新的 csv 中")
 	// query := schema.UserMessage("Please help me extract the first column in question.csv table into a new csv")
-	query := schema.UserMessage("请帮我在网上搜索深圳明天天气")
+	//query := schema.UserMessage("请帮我在网上搜索并总结昆明 4.3-4.6日的旅游注意事项")
+	query := schema.UserMessage("请帮我在网上搜索并总结昆明4月旅游注意事项")
 	ctx := context.Background()
 
 	traceCloseFn, startSpanFn := trace.AppendCozeLoopCallbackIfConfigured(ctx)
@@ -170,14 +171,16 @@ func newExcelAgent(ctx context.Context) (adk.Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-
+	// 定义了主 Agent
 	deepAgent, err := deep.New(ctx, &deep.Config{
 		Name:        "ExcelAgent",
 		Description: "an agent for excel task",
 		ChatModel:   cm,
-		SubAgents:   []adk.Agent{ca, wa},
+		// 注册子 Agent
+		SubAgents: []adk.Agent{ca, wa},
 		ToolsConfig: adk.ToolsConfig{
 			ToolsNodeConfig: compose.ToolsNodeConfig{
+				// 主 Agent 可用的工具
 				Tools: []tool.BaseTool{
 					tools.NewWrapTool(tools.NewReadFileTool(operator), nil, nil),
 					tools.NewWrapTool(tools.NewTreeTool(operator), nil, nil),
