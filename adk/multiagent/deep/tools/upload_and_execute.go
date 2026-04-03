@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"sandbox"
+	"github.com/cloudwego/eino-examples/adk/multiagent/deep/sandbox"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"

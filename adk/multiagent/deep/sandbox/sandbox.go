@@ -179,13 +179,36 @@ func (m *SandboxManager) Execute(req *ExecuteRequest) (*ExecuteResult, error) {
 		}, err
 	}
 
-	return &ExecuteResult{
+	execResult := &ExecuteResult{
 		Success:  result.Error == "",
 		TaskId:   taskId,
 		Output:   result.Output,
 		Error:    result.Error,
 		Products: result.Products,
-	}, nil
+	}
+
+	// 打印沙箱代码执行结果
+	fmt.Printf("\n[SandboxManager] ========== 代码执行结果 (taskId=%s) ==========\n", taskId)
+	if execResult.Success {
+		fmt.Printf("[SandboxManager] ✅ 执行状态: 成功\n")
+	} else {
+		fmt.Printf("[SandboxManager] ❌ 执行状态: 失败\n")
+	}
+	if execResult.Output != "" {
+		fmt.Printf("[SandboxManager] 📤 标准输出:\n%s\n", execResult.Output)
+	}
+	if execResult.Error != "" {
+		fmt.Printf("[SandboxManager] 📛 错误信息:\n%s\n", execResult.Error)
+	}
+	if len(execResult.Products) > 0 {
+		fmt.Printf("[SandboxManager] 📁 产出文件:\n")
+		for name, item := range execResult.Products {
+			fmt.Printf("  - %s (%d bytes): %s\n", name, item.Size, item.URL)
+		}
+	}
+	fmt.Printf("[SandboxManager] ================================================\n\n")
+
+	return execResult, nil
 }
 
 // --- 以下为内部实现 ---
@@ -336,13 +359,16 @@ func (m *SandboxManager) startAndExecute(taskId, cmd, scriptContent, scriptName 
 
 	// 6. 清理COS文件（延迟清理）
 	go func() {
-		if len(result.Products) > 0 {
-			cleanDelay := productURLExpiry + 5*time.Minute
-			fmt.Printf("[SandboxManager] 产出文件已生成URL，COS清理延迟至 %.0f 分钟后\n", cleanDelay.Minutes())
-			time.Sleep(cleanDelay)
-		} else {
-			time.Sleep(5 * time.Second)
-		}
+		cleanDelay := productURLExpiry + 5*time.Minute
+		fmt.Printf("COS延迟至 %.0f 分钟后清理\n", cleanDelay.Minutes())
+		time.Sleep(cleanDelay)
+		//if len(result.Products) > 0 {
+		//	cleanDelay := productURLExpiry + 5*time.Minute
+		//	fmt.Printf("[SandboxManager] 产出文件已生成URL，COS清理延迟至 %.0f 分钟后\n", cleanDelay.Minutes())
+		//	time.Sleep(cleanDelay)
+		//} else {
+		//	time.Sleep(5 * time.Second)
+		//}
 		if cleanErr := m.cosManager.CleanTask(taskId); cleanErr != nil {
 			fmt.Printf("[SandboxManager] ⚠️ 清理COS文件失败: %v\n", cleanErr)
 		}
