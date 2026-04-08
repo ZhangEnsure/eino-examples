@@ -18,9 +18,13 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cloudwego/eino/adk"
@@ -59,7 +63,7 @@ func main() {
 	//query := schema.UserMessage("请帮我查询深圳的地理位置信息，当前深圳的时间，以及深圳今天的天气情况")
 	
 	//query := schema.UserMessage("请帮我生成一只小猫的图片")
-	query := schema.UserMessage("请帮把除了小猫之外的所有背景扣掉，b10cd99c-e4e5-41c5-bf22-69e485c1dc63.png")
+	query := schema.UserMessage("请帮把除了小猫之外的所有背景扣掉，file:///Users/earky/Downloads/1290a524-c92f-4da6-89d7-5372c704b066.png")
 	//query := schema.UserMessage("请帮我分析该图片，<COS图片URL>")
 	
 	ctx := context.Background()
@@ -248,10 +252,155 @@ func newExcelAgent(ctx context.Context) (adk.Agent, error) {
 			},
 		},
 		MaxIteration: 100,
+		// 安全工具中间件：捕获所有工具调用错误，转为友好提示返回给模型，避免中断 Agent 流程
+		Handlers: []adk.ChatModelAgentMiddleware{
+			&safeToolMiddleware{},
+		},
+		// 模型调用重试配置：遇到临时性错误时自动重试，最多重试 5 次（指数退避）
+		ModelRetryConfig: &adk.ModelRetryConfig{
+			MaxRetries: 5,
+			IsRetryAble: func(_ context.Context, err error) bool {
+				if err == nil {
+					return false
+				}
+				errMsg := err.Error()
+				// 将错误信息转为小写，方便统一匹配
+				lowerMsg := strings.ToLower(errMsg)
+
+				shouldRetry := false
+				reason := ""
+
+				switch {
+				// 1. HTTP 429 限流错误（最常见）
+				case strings.Contains(errMsg, "429") ||
+					strings.Contains(lowerMsg, "too many requests") ||
+					strings.Contains(lowerMsg, "qpm limit") ||
+					strings.Contains(lowerMsg, "rate limit") ||
+					strings.Contains(lowerMsg, "rate_limit") ||
+					strings.Contains(lowerMsg, "throttl"):
+					shouldRetry = true
+					reason = "限流(429/rate limit)"
+
+				// 2. HTTP 503 服务暂时不可用
+				case strings.Contains(errMsg, "503") ||
+					strings.Contains(lowerMsg, "service unavailable") ||
+					strings.Contains(lowerMsg, "service temporarily unavailable"):
+					shouldRetry = true
+					reason = "服务暂时不可用(503)"
+
+				// 3. HTTP 502 网关错误
+				case strings.Contains(errMsg, "502") ||
+					strings.Contains(lowerMsg, "bad gateway"):
+					shouldRetry = true
+					reason = "网关错误(502)"
+
+				// 4. 超时错误
+				case strings.Contains(lowerMsg, "timeout") ||
+					strings.Contains(lowerMsg, "deadline exceeded") ||
+					strings.Contains(lowerMsg, "context deadline"):
+					shouldRetry = true
+					reason = "请求超时"
+
+				// 5. 连接错误（网络抖动）
+				case strings.Contains(lowerMsg, "connection reset") ||
+					strings.Contains(lowerMsg, "connection refused") ||
+					strings.Contains(lowerMsg, "broken pipe") ||
+					strings.Contains(lowerMsg, "eof"):
+					shouldRetry = true
+					reason = "连接错误"
+
+				// 6. 服务端内部错误（500，谨慎重试）
+				case strings.Contains(errMsg, "500") &&
+					strings.Contains(lowerMsg, "internal server error"):
+					shouldRetry = true
+					reason = "服务端内部错误(500)"
+				}
+
+				if shouldRetry {
+					log.Printf("⚠️ 模型调用失败，准备重试 | 原因: %s | 错误: %s", reason, errMsg)
+				}
+				return shouldRetry
+			},
+		},
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	return deepAgent, nil
+}
+
+// safeToolMiddleware 安全工具中间件
+// 捕获工具调用过程中的所有错误（如文件找不到、网络异常、参数错误等），
+// 将错误转为 "[tool error] xxx" 格式的字符串返回给模型，
+// 让模型可以根据错误信息调整策略，而不是直接中断整个 Agent 流程。
+type safeToolMiddleware struct {
+	*adk.BaseChatModelAgentMiddleware
+}
+
+func (m *safeToolMiddleware) WrapInvokableToolCall(
+	_ context.Context,
+	endpoint adk.InvokableToolCallEndpoint,
+	_ *adk.ToolContext,
+) (adk.InvokableToolCallEndpoint, error) {
+	return func(ctx context.Context, args string, opts ...tool.Option) (string, error) {
+		result, err := endpoint(ctx, args, opts...)
+		if err != nil {
+			// 中断错误需要继续传播，不能拦截
+			if _, ok := compose.IsInterruptRerunError(err); ok {
+				return "", err
+			}
+			log.Printf("⚠️ 工具调用失败，已转为提示信息 | 错误: %v", err)
+			return fmt.Sprintf("[tool error] %v", err), nil
+		}
+		return result, nil
+	}, nil
+}
+
+func (m *safeToolMiddleware) WrapStreamableToolCall(
+	_ context.Context,
+	endpoint adk.StreamableToolCallEndpoint,
+	_ *adk.ToolContext,
+) (adk.StreamableToolCallEndpoint, error) {
+	return func(ctx context.Context, args string, opts ...tool.Option) (*schema.StreamReader[string], error) {
+		sr, err := endpoint(ctx, args, opts...)
+		if err != nil {
+			// 中断错误需要继续传播，不能拦截
+			if _, ok := compose.IsInterruptRerunError(err); ok {
+				return nil, err
+			}
+			log.Printf("⚠️ 流式工具调用失败，已转为提示信息 | 错误: %v", err)
+			return singleChunkReader(fmt.Sprintf("[tool error] %v", err)), nil
+		}
+		return safeWrapReader(sr), nil
+	}, nil
+}
+
+// singleChunkReader 创建一个只发送一条消息的 StreamReader
+func singleChunkReader(msg string) *schema.StreamReader[string] {
+	r, w := schema.Pipe[string](1)
+	_ = w.Send(msg, nil)
+	w.Close()
+	return r
+}
+
+// safeWrapReader 包装流式读取器，将流中的错误转为错误提示消息
+func safeWrapReader(sr *schema.StreamReader[string]) *schema.StreamReader[string] {
+	r, w := schema.Pipe[string](64)
+	go func() {
+		defer w.Close()
+		for {
+			chunk, err := sr.Recv()
+			if errors.Is(err, io.EOF) {
+				return
+			}
+			if err != nil {
+				log.Printf("⚠️ 流式工具读取错误: %v", err)
+				_ = w.Send(fmt.Sprintf("\n[tool error] %v", err), nil)
+				return
+			}
+			_ = w.Send(chunk, nil)
+		}
+	}()
+	return r
 }
