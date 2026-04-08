@@ -35,7 +35,8 @@ func main() {
 	var instruction string
 	flag.StringVar(&instruction, "instruction", "You are a helpful assistant.", "")
 	flag.Parse()
-
+	// 打印出 flag.Args()
+	fmt.Println(flag.Args())
 	query := strings.TrimSpace(strings.Join(flag.Args(), " "))
 	if query == "" {
 		_, _ = fmt.Fprintln(os.Stderr, "usage: go run ./cmd/ch01 -- \"your question\"")
@@ -43,18 +44,20 @@ func main() {
 	}
 
 	ctx := context.Background()
+	// 创建 ChatModel
 	cm, err := newChatModel(ctx)
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-
+	// 构造输入消息
 	messages := []*schema.Message{
 		schema.SystemMessage(instruction),
 		schema.UserMessage(query),
 	}
 
 	_, _ = fmt.Fprint(os.Stdout, "[assistant] ")
+	// 调用 Stream 接口
 	stream, err := cm.Stream(ctx, messages)
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)

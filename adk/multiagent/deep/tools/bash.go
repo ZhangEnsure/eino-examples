@@ -63,7 +63,8 @@ type shellInput struct {
 }
 
 // 接口只有两个方法：Info() 返回描述，InvokableRun() 执行逻辑
-func (b *bashTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+func (b *bashTool) InvokableRun(ctx context.Context, argumentsInJSON string,
+	opts ...tool.Option) (string, error) {
 	//  1. 解析 Json 参数
 	input := &shellInput{}
 	err := json.Unmarshal([]byte(argumentsInJSON), input)

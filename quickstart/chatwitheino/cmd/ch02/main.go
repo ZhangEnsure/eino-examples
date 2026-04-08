@@ -39,7 +39,7 @@ func main() {
 
 	ctx := context.Background()
 	cm := examplemodel.NewChatModel()
-
+	// 创建了一个 ChatModelAgent，它对ChatModel进行了封装，添加了内存中的多轮历史记录功能。
 	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name:        "Ch02ChatModelAgent",
 		Description: "A minimal ChatModelAgent with in-memory multi-turn history.",
@@ -50,12 +50,12 @@ func main() {
 		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-
+	// 创建了一个执行器
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{
 		Agent:           agent,
 		EnableStreaming: true,
 	})
-
+	// 记录多轮对话历史
 	history := make([]*schema.Message, 0, 16)
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
@@ -67,9 +67,11 @@ func main() {
 		if line == "" {
 			break
 		}
+		// 1. 把用户输入包装成 UserMessage，追加到 history
 		history = append(history, schema.UserMessage(line))
-
+		// 2. 调用 Runner 执行 Agent，传入完整的对话历史
 		events := runner.Run(ctx, history)
+		// 3. 消费事件流，打印并收集 AI 的回复文本
 		content, err := printAndCollectAssistantFromEvents(events)
 		if err != nil {
 			_, _ = fmt.Fprintln(os.Stderr, err)
