@@ -53,9 +53,10 @@ func main() {
 	//query := schema.UserMessage("请帮我搜索明天深圳天气")
 	//query := schema.UserMessage("请帮我在网上搜索明天深圳天气")
 	//query := schema.UserMessage("请帮我查询腾讯最新新闻")
-	query := schema.UserMessage("请帮我总结知识内容：https://golang-china.github.io/gopl-zh/ch8/ch8-01.html")
+	//query := schema.UserMessage("请帮我总结知识内容：https://golang-china.github.io/gopl-zh/ch8/ch8-01.html")
 	//query := schema.UserMessage("请帮我在网上搜索并总结昆明4月旅游注意事项")
 	//query := schema.UserMessage("请在沙箱中给出一个快速排序的算法，并给出一个测试用例的排序结果")
+	query := schema.UserMessage("请帮我查询深圳的地理位置信息，当前深圳的时间，以及深圳今天的天气情况")
 	ctx := context.Background()
 
 	traceCloseFn, startSpanFn := trace.AppendCozeLoopCallbackIfConfigured(ctx)
@@ -183,6 +184,12 @@ func newExcelAgent(ctx context.Context) (adk.Agent, error) {
 		return nil, err
 	}
 
+	// 创建实用工具 Agent（天气、时间、位置查询）
+	ua, err := agents.NewUtilityAgent(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	// 创建沙箱管理器（从配置文件加载，敏感信息通过环境变量注入）
 	// sandbox.NewSandboxManagerFromConfigFile 会读取 config.yaml，然后用环境变量覆盖敏感字段
 	sandboxConfigPath := filepath.Join("adk/multiagent/deep/sandbox/config.yaml")
@@ -202,7 +209,7 @@ func newExcelAgent(ctx context.Context) (adk.Agent, error) {
 
 	// 构建子 Agent 列表
 	// 始终包含 CodeAgent、WebSearchAgent 和 WebFetchAgent，如果沙箱可用则额外添加 SandboxCodeAgent
-	subAgents := []adk.Agent{ca, wa, wfa}
+	subAgents := []adk.Agent{ca, wa, wfa, ua}
 	if sca != nil {
 		subAgents = append(subAgents, sca)
 	}
