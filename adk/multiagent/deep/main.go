@@ -56,7 +56,12 @@ func main() {
 	//query := schema.UserMessage("请帮我总结知识内容：https://golang-china.github.io/gopl-zh/ch8/ch8-01.html")
 	//query := schema.UserMessage("请帮我在网上搜索并总结昆明4月旅游注意事项")
 	//query := schema.UserMessage("请在沙箱中给出一个快速排序的算法，并给出一个测试用例的排序结果")
-	query := schema.UserMessage("请帮我查询深圳的地理位置信息，当前深圳的时间，以及深圳今天的天气情况")
+	//query := schema.UserMessage("请帮我查询深圳的地理位置信息，当前深圳的时间，以及深圳今天的天气情况")
+	
+	//query := schema.UserMessage("请帮我生成一只小猫的图片")
+	query := schema.UserMessage("请帮把除了小猫之外的所有背景扣掉，b10cd99c-e4e5-41c5-bf22-69e485c1dc63.png")
+	//query := schema.UserMessage("请帮我分析该图片，<COS图片URL>")
+	
 	ctx := context.Background()
 
 	traceCloseFn, startSpanFn := trace.AppendCozeLoopCallbackIfConfigured(ctx)
@@ -190,6 +195,14 @@ func newExcelAgent(ctx context.Context) (adk.Agent, error) {
 		return nil, err
 	}
 
+	// 创建图像处理 Agent（图片生成、编辑、查看分析）
+	var ia adk.Agent
+	ia, err = agents.NewImageAgent(ctx)
+	if err != nil {
+		log.Printf("⚠️ 图像处理 Agent 创建失败（ImageAgent 将不可用）: %v", err)
+		ia = nil
+	}
+
 	// 创建沙箱管理器（从配置文件加载，敏感信息通过环境变量注入）
 	// sandbox.NewSandboxManagerFromConfigFile 会读取 config.yaml，然后用环境变量覆盖敏感字段
 	sandboxConfigPath := filepath.Join("adk/multiagent/deep/sandbox/config.yaml")
@@ -208,10 +221,14 @@ func newExcelAgent(ctx context.Context) (adk.Agent, error) {
 	}
 
 	// 构建子 Agent 列表
-	// 始终包含 CodeAgent、WebSearchAgent 和 WebFetchAgent，如果沙箱可用则额外添加 SandboxCodeAgent
+	// 始终包含 CodeAgent、WebSearchAgent、WebFetchAgent 和 UtilityAgent
+	// 如果沙箱可用则额外添加 SandboxCodeAgent，如果图像处理可用则额外添加 ImageAgent
 	subAgents := []adk.Agent{ca, wa, wfa, ua}
 	if sca != nil {
 		subAgents = append(subAgents, sca)
+	}
+	if ia != nil {
+		subAgents = append(subAgents, ia)
 	}
 
 	// 定义了主 Agent
