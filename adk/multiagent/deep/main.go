@@ -27,7 +27,9 @@ import (
 	"strings"
 	"time"
 
+	localbk "github.com/cloudwego/eino-ext/adk/backend/local"
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/middlewares/skill"
 	"github.com/cloudwego/eino/adk/prebuilt/deep"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
@@ -61,11 +63,11 @@ func main() {
 	//query := schema.UserMessage("请帮我在网上搜索并总结昆明4月旅游注意事项")
 	//query := schema.UserMessage("请在沙箱中给出一个快速排序的算法，并给出一个测试用例的排序结果")
 	//query := schema.UserMessage("请帮我查询深圳的地理位置信息，当前深圳的时间，以及深圳今天的天气情况")
-	
+
 	//query := schema.UserMessage("请帮我生成一只小猫的图片")
-	query := schema.UserMessage("请帮把除了小猫之外的所有背景扣掉，file:///Users/earky/Downloads/1290a524-c92f-4da6-89d7-5372c704b066.png")
+	//query := schema.UserMessage("请帮把除了小猫之外的所有背景扣掉，file:///Users/earky/Downloads/1290a524-c92f-4da6-89d7-5372c704b066.png")
 	//query := schema.UserMessage("请帮我分析该图片，<COS图片URL>")
-	
+	query := schema.UserMessage("你现在有哪些 Skill？")
 	ctx := context.Background()
 
 	traceCloseFn, startSpanFn := trace.AppendCozeLoopCallbackIfConfigured(ctx)
@@ -235,6 +237,40 @@ func newExcelAgent(ctx context.Context) (adk.Agent, error) {
 		subAgents = append(subAgents, ia)
 	}
 
+	// 构建 Skill 中间件（可选）
+	// 默认使用 eino-ext 的四个 Skill（eino-guide/eino-component/eino-compose/eino-agent）
+	// 可通过环境变量 EINO_EXT_SKILLS_DIR 覆盖 skills 目录路径
+	var handlers []adk.ChatModelAgentMiddleware
+	skillsDir, skillsFound := resolveSkillsDir()
+	if skillsFound {
+		backend, backendErr := localbk.NewBackend(ctx, &localbk.Config{})
+		if backendErr != nil {
+			log.Printf("⚠️ Skill backend 创建失败（Skill 将不可用）: %v", backendErr)
+		} else {
+			skillBackend, sbErr := skill.NewBackendFromFilesystem(ctx, &skill.BackendFromFilesystemConfig{
+				Backend: backend,
+				BaseDir: skillsDir,
+			})
+			if sbErr != nil {
+				log.Printf("⚠️ Skill backend from filesystem 创建失败（Skill 将不可用）: %v", sbErr)
+			} else {
+				skillMiddleware, smErr := skill.NewMiddleware(ctx, &skill.Config{
+					Backend: skillBackend,
+				})
+				if smErr != nil {
+					log.Printf("⚠️ Skill 中间件创建失败（Skill 将不可用）: %v", smErr)
+				} else {
+					handlers = append(handlers, skillMiddleware)
+					log.Printf("✅ Skill 中间件已启用，skills 目录: %s", skillsDir)
+				}
+			}
+		}
+	} else {
+		log.Println("ℹ️ Skill 未配置（设置 EINO_EXT_SKILLS_DIR 环境变量可启用）")
+	}
+	// 安全工具中间件放在最后，确保能捕获所有工具（包括 Skill 工具）的错误
+	handlers = append(handlers, &safeToolMiddleware{})
+
 	// 定义了主 Agent
 	deepAgent, err := deep.New(ctx, &deep.Config{
 		Name:        "ExcelAgent",
@@ -252,10 +288,8 @@ func newExcelAgent(ctx context.Context) (adk.Agent, error) {
 			},
 		},
 		MaxIteration: 100,
-		// 安全工具中间件：捕获所有工具调用错误，转为友好提示返回给模型，避免中断 Agent 流程
-		Handlers: []adk.ChatModelAgentMiddleware{
-			&safeToolMiddleware{},
-		},
+		// Skill 中间件 + 安全工具中间件
+		Handlers: handlers,
 		// 模型调用重试配置：遇到临时性错误时自动重试，最多重试 5 次（指数退避）
 		ModelRetryConfig: &adk.ModelRetryConfig{
 			MaxRetries: 5,
@@ -328,6 +362,25 @@ func newExcelAgent(ctx context.Context) (adk.Agent, error) {
 	}
 
 	return deepAgent, nil
+}
+
+// resolveSkillsDir 解析 Skill 目录路径
+// 优先使用环境变量 EINO_EXT_SKILLS_DIR，否则使用默认的 eino-ext skills 路径
+func resolveSkillsDir() (string, bool) {
+	// 优先从环境变量获取
+	skillsDir := strings.TrimSpace(os.Getenv("EINO_EXT_SKILLS_DIR"))
+	if skillsDir == "" {
+		// 默认使用 chatwitheino 项目下的 eino-ext skills
+		skillsDir = "/Users/zes/work/eino-examples/quickstart/chatwitheino/skills/eino-ext"
+	}
+	if absDir, err := filepath.Abs(skillsDir); err == nil {
+		skillsDir = absDir
+	}
+	fi, err := os.Stat(skillsDir)
+	if err != nil || !fi.IsDir() {
+		return "", false
+	}
+	return skillsDir, true
 }
 
 // safeToolMiddleware 安全工具中间件
