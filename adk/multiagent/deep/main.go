@@ -17,6 +17,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -47,27 +48,6 @@ import (
 )
 
 func main() {
-	// Set your own query here. e.g.
-	// query := schema.UserMessage("统计附件文件中推荐的小说名称及推荐次数，并将结果写到文件中。凡是带有《》内容都是小说名称，形成表格，表头为小说名称和推荐次数，同名小说只列一行，推荐次数相加")
-	// query := schema.UserMessage("Count the recommended novel names and recommended times in the attachment file, and write the results into the file. The content with "" is the name of the novel, forming a table. The header is the name of the novel and the number of recommendations. The novels with the same name are listed in one row, and the number of recommendations is added")
-
-	// query := schema.UserMessage("读取 模拟出题.csv 中的表格内容，规范格式将题目、答案、解析、选项放在同一行，简答题只把答案写入解析即可")
-	// query := schema.UserMessage("Read the table content in the 模拟出题.csv, put the question, answer, resolution and options in the same line in a standardized format, and simply write the answer into the resolution")
-
-	// query := schema.UserMessage("请帮我将 questions.csv 表格中的第一列提取到一个新的 csv 中")
-	// query := schema.UserMessage("Please help me extract the first column in question.csv table into a new csv")
-	//query := schema.UserMessage("请帮我搜索明天深圳天气")
-	//query := schema.UserMessage("请帮我在网上搜索明天深圳天气")
-	//query := schema.UserMessage("请帮我查询腾讯最新新闻")
-	//query := schema.UserMessage("请帮我总结知识内容：https://golang-china.github.io/gopl-zh/ch8/ch8-01.html")
-	//query := schema.UserMessage("请帮我在网上搜索并总结昆明4月旅游注意事项")
-	//query := schema.UserMessage("请在沙箱中给出一个快速排序的算法，并给出一个测试用例的排序结果")
-	//query := schema.UserMessage("请帮我查询深圳的地理位置信息，当前深圳的时间，以及深圳今天的天气情况")
-
-	//query := schema.UserMessage("请帮我生成一只小猫的图片")
-	//query := schema.UserMessage("请帮把除了小猫之外的所有背景扣掉，file:///Users/earky/Downloads/1290a524-c92f-4da6-89d7-5372c704b066.png")
-	//query := schema.UserMessage("请帮我分析该图片，<COS图片URL>")
-	query := schema.UserMessage("你现在有哪些 Skill？")
 	ctx := context.Background()
 
 	traceCloseFn, startSpanFn := trace.AppendCozeLoopCallbackIfConfigured(ctx)
@@ -125,12 +105,75 @@ func main() {
 		params.TaskIDKey:                     id,
 	})
 
-	ctx, endSpanFn := startSpanFn(ctx, "plan-execute-replan", query)
+	// ========== 多轮对话循环 ==========
+	// 仿照 ch02 的方式，维护 history 对话历史，循环读取用户输入
+	history := make([]*schema.Message, 0, 16)
+	scanner := bufio.NewScanner(os.Stdin)
+	// 设置较大的缓冲区，避免长输入被截断
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
-	iter := runner.Run(ctx, []*schema.Message{query})
+	fmt.Println("========================================")
+	fmt.Println("  Deep Agent 多轮对话模式")
+	fmt.Println("  输入问题开始对话，输入空行退出")
+	fmt.Println("========================================")
 
+	for {
+		fmt.Print("\nyou> ")
+		if !scanner.Scan() {
+			break
+		}
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			fmt.Println("对话结束，再见！")
+			break
+		}
+
+		// 1. 把用户输入包装成 UserMessage，追加到 history
+		query := schema.UserMessage(line)
+		history = append(history, query)
+
+		// 2. 为每轮对话创建 trace span
+		spanCtx, endSpanFn := startSpanFn(ctx, "plan-execute-replan", query)
+
+		// 3. 调用 Runner 执行 Agent，传入完整的对话历史
+		iter := runner.Run(spanCtx, history)
+
+		// 4. 消费事件流，打印并收集 AI 的回复文本
+		assistantContent := consumeEventsAndCollect(iter)
+
+		// 5. 结束 trace span
+		if assistantContent != "" {
+			endSpanFn(spanCtx, schema.AssistantMessage(assistantContent, nil))
+		} else {
+			endSpanFn(spanCtx, "finished without output message")
+		}
+
+		// 6. 把本轮 assistant 回复追加到 history，供下一轮使用
+		if assistantContent != "" {
+			history = append(history, schema.AssistantMessage(assistantContent, nil))
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		log.Printf("读取输入错误: %v", err)
+	}
+
+	// 等待异步 trace 上报完成
+	time.Sleep(time.Second * 5)
+}
+
+// consumeEventsAndCollect 消费事件流，使用 prints.Event 打印事件，
+// 同时收集最终的 assistant 回复文本用于维护多轮对话历史。
+//
+// 核心难点：prints.Event 内部会消费流式 MessageStream（调用 Recv），
+// 所以不能在 prints.Event 之后再从同一个 stream 读取。
+// 解决方案：对流式消息使用 Copy(2) 复制出两份 stream，
+// 一份给 prints.Event 打印，另一份用于收集文本。
+func consumeEventsAndCollect(iter *adk.AsyncIterator[*adk.AgentEvent]) string {
 	var (
-		lastMessage       adk.Message
+		// lastMessage 保存最后一条非流式的 assistant 消息
+		lastMessage adk.Message
+		// lastMessageStream 保存最后一条流式消息的副本（用于收集文本）
 		lastMessageStream *schema.StreamReader[adk.Message]
 	)
 
@@ -140,10 +183,14 @@ func main() {
 			break
 		}
 		if event.Output != nil && event.Output.MessageOutput != nil {
+			// 关闭上一轮未消费完的流（避免 goroutine 泄漏）
 			if lastMessageStream != nil {
 				lastMessageStream.Close()
 			}
 			if event.Output.MessageOutput.IsStreaming {
+				// Copy(2) 是 schema.StreamReader 的方法，将一个 stream 复制为 N 个独立的 stream，
+				// 每个副本都能独立消费完整的数据流。
+				// cpStream[0] 给 prints.Event 打印，cpStream[1] 留给我们收集文本。
 				cpStream := event.Output.MessageOutput.MessageStream.Copy(2)
 				event.Output.MessageOutput.MessageStream = cpStream[0]
 				lastMessage = nil
@@ -156,16 +203,22 @@ func main() {
 		prints.Event(event)
 	}
 
+	// 从最后一条消息中提取 assistant 回复文本
 	if lastMessage != nil {
-		endSpanFn(ctx, lastMessage)
-	} else if lastMessageStream != nil {
-		msg, _ := schema.ConcatMessageStream(lastMessageStream)
-		endSpanFn(ctx, msg)
-	} else {
-		endSpanFn(ctx, "finished without output message")
+		return lastMessage.Content
 	}
-
-	time.Sleep(time.Second * 30)
+	if lastMessageStream != nil {
+		// ConcatMessageStream 将流式消息的所有 chunk 拼接为一条完整的 Message
+		msg, err := schema.ConcatMessageStream(lastMessageStream)
+		if err != nil {
+			log.Printf("⚠️ 收集流式回复失败: %v", err)
+			return ""
+		}
+		if msg != nil {
+			return msg.Content
+		}
+	}
+	return ""
 }
 
 func newExcelAgent(ctx context.Context) (adk.Agent, error) {

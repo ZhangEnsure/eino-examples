@@ -52,3 +52,5 @@ quickstart/chatwitheino/skills/
 
 *.jsonl
 *.txt
+agent_root/*
+adk/multiagent/deep/playground/*
