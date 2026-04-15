@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -41,6 +42,7 @@ import (
 	"github.com/cloudwego/eino-examples/adk/common/trace"
 	"github.com/cloudwego/eino-examples/adk/multiagent/deep/agents"
 	"github.com/cloudwego/eino-examples/adk/multiagent/deep/generic"
+	"github.com/cloudwego/eino-examples/adk/multiagent/deep/mem"
 	"github.com/cloudwego/eino-examples/adk/multiagent/deep/params"
 	"github.com/cloudwego/eino-examples/adk/multiagent/deep/sandbox"
 	"github.com/cloudwego/eino-examples/adk/multiagent/deep/tools"
@@ -48,6 +50,11 @@ import (
 )
 
 func main() {
+	// ========== 命令行参数 ==========
+	var sessionID string
+	flag.StringVar(&sessionID, "session", "", "session ID（留空则创建新会话，指定则恢复已有会话）")
+	flag.Parse()
+
 	ctx := context.Background()
 
 	traceCloseFn, startSpanFn := trace.AppendCozeLoopCallbackIfConfigured(ctx)
@@ -105,9 +112,35 @@ func main() {
 		params.TaskIDKey:                     id,
 	})
 
+	// ========== Session 持久化存储 ==========
+	// 使用 JSONL 文件存储对话历史，支持跨进程恢复会话
+	sessionDir := os.Getenv("SESSION_DIR")
+	if sessionDir == "" {
+		sessionDir = "./data/sessions"
+	}
+
+	store, err := mem.NewStore(sessionDir)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if sessionID == "" {
+		sessionID = uuid.New().String()
+		log.Printf("📝 创建新会话: %s", sessionID)
+	} else {
+		log.Printf("📝 恢复已有会话: %s", sessionID)
+	}
+
+	session, err := store.GetOrCreate(sessionID)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if session.MessageCount() > 0 {
+		log.Printf("📝 会话标题: %s | 已有 %d 条消息", session.Title(), session.MessageCount())
+	}
+
 	// ========== 多轮对话循环 ==========
-	// 仿照 ch02 的方式，维护 history 对话历史，循环读取用户输入
-	history := make([]*schema.Message, 0, 16)
 	scanner := bufio.NewScanner(os.Stdin)
 	// 设置较大的缓冲区，避免长输入被截断
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -115,6 +148,7 @@ func main() {
 	fmt.Println("========================================")
 	fmt.Println("  Deep Agent 多轮对话模式")
 	fmt.Println("  输入问题开始对话，输入空行退出")
+	fmt.Printf("  Session: %s\n", sessionID)
 	fmt.Println("========================================")
 
 	for {
@@ -128,14 +162,17 @@ func main() {
 			break
 		}
 
-		// 1. 把用户输入包装成 UserMessage，追加到 history
+		// 1. 把用户输入包装成 UserMessage，追加到 Session（同时持久化到磁盘）
 		query := schema.UserMessage(line)
-		history = append(history, query)
+		if err := session.Append(query); err != nil {
+			log.Printf("⚠️ 保存用户消息失败: %v", err)
+		}
 
 		// 2. 为每轮对话创建 trace span
 		spanCtx, endSpanFn := startSpanFn(ctx, "plan-execute-replan", query)
 
-		// 3. 调用 Runner 执行 Agent，传入完整的对话历史
+		// 3. 调用 Runner 执行 Agent，传入完整的对话历史（从 Session 获取）
+		history := session.GetMessages()
 		iter := runner.Run(spanCtx, history)
 
 		// 4. 消费事件流，打印并收集 AI 的回复文本
@@ -148,15 +185,21 @@ func main() {
 			endSpanFn(spanCtx, "finished without output message")
 		}
 
-		// 6. 把本轮 assistant 回复追加到 history，供下一轮使用
+		// 6. 把本轮 assistant 回复追加到 Session（同时持久化到磁盘），供下一轮使用
 		if assistantContent != "" {
-			history = append(history, schema.AssistantMessage(assistantContent, nil))
+			if err := session.Append(schema.AssistantMessage(assistantContent, nil)); err != nil {
+				log.Printf("⚠️ 保存助手消息失败: %v", err)
+			}
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
 		log.Printf("读取输入错误: %v", err)
 	}
+
+	// 打印 Session 恢复提示
+	fmt.Printf("\nSession 已保存: %s\n", sessionID)
+	fmt.Printf("恢复会话: go run ./adk/multiagent/deep --session %s\n", sessionID)
 
 	// 等待异步 trace 上报完成
 	time.Sleep(time.Second * 5)
@@ -221,8 +264,56 @@ func consumeEventsAndCollect(iter *adk.AsyncIterator[*adk.AgentEvent]) string {
 	return ""
 }
 
+// resolveAgentCoreDir 解析 agent-core 目录的绝对路径
+func resolveAgentCoreDir() string {
+	// 优先从环境变量获取
+	if dir := os.Getenv("AGENT_CORE_DIR"); dir != "" {
+		if abs, err := filepath.Abs(dir); err == nil {
+			return abs
+		}
+		return dir
+	}
+	// 默认使用 deep 项目下的 agent-core 目录
+	return "/Users/zes/work/eino-examples/adk/multiagent/deep/agent-core"
+}
+
+// buildAgentCoreInstruction 读取 agent-core 文件，构建注入到 Agent 的 Instruction
+func buildAgentCoreInstruction(agentCoreDir string) string {
+	var sb strings.Builder
+
+	// 读取各个 agent-core 文件
+	files := []struct {
+		name    string
+		section string
+	}{
+		{"SOUL.md", "Soul (Behavioral Guidelines)"},
+		{"AGENTS.md", "Agent Workflows"},
+		{"TOOLS.md", "Tool Usage Patterns"},
+		{"MEMORY.md", "Long-term Memory"},
+	}
+
+	sb.WriteString("\n\n## Agent Core Knowledge\n\n")
+	sb.WriteString(fmt.Sprintf("Agent-core directory: %s\n\n", agentCoreDir))
+
+	for _, f := range files {
+		content, err := os.ReadFile(filepath.Join(agentCoreDir, f.name))
+		if err != nil {
+			continue
+		}
+		text := strings.TrimSpace(string(content))
+		if text == "" {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("### %s\n\n%s\n\n", f.section, text))
+	}
+
+	return sb.String()
+}
+
 func newExcelAgent(ctx context.Context) (adk.Agent, error) {
 	operator := &LocalOperator{}
+	agentCoreDir := resolveAgentCoreDir()
+	log.Printf("📝 Agent-core 目录: %s", agentCoreDir)
 
 	cm, err := utils.NewChatModel(ctx,
 		utils.WithMaxTokens(4096),
@@ -321,14 +412,37 @@ func newExcelAgent(ctx context.Context) (adk.Agent, error) {
 	} else {
 		log.Println("ℹ️ Skill 未配置（设置 EINO_EXT_SKILLS_DIR 环境变量可启用）")
 	}
+	// Self-Improvement 中间件：注入学习提醒 + 错误检测
+	// 放在 Skill 中间件之后、安全工具中间件之前
+	//
+	// 配置说明（对应 hooks-setup.md 中的两种 Setup 模式）：
+	//   - EnableReminder:       对应 UserPromptSubmit hook (activator.sh)，每次模型调用前注入 <self-improvement-reminder>
+	//   - EnableErrorDetection: 对应 PostToolUse hook (error-detector.sh)，工具执行后检测错误并注入 <error-detected>
+	//
+	// 当前配置：仅启用 Reminder（Minimal Setup），暂不启用 ErrorDetection 以保持稳定
+	// 如需启用完整模式（Full Setup），将 EnableErrorDetection 改为 true 即可
+	siConfig := selfImprovementConfig{
+		EnableReminder:       true,
+		EnableErrorDetection: false,
+	}
+	handlers = append(handlers, &selfImprovementMiddleware{
+		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
+		config:                       siConfig,
+	})
+	log.Printf("✅ Self-improvement 中间件已启用 | Reminder=%v, ErrorDetection=%v", siConfig.EnableReminder, siConfig.EnableErrorDetection)
+
 	// 安全工具中间件放在最后，确保能捕获所有工具（包括 Skill 工具）的错误
 	handlers = append(handlers, &safeToolMiddleware{})
+
+	// 构建 agent-core Instruction（将 SOUL.md/AGENTS.md/TOOLS.md/MEMORY.md 注入到系统提示中）
+	agentCoreInstruction := buildAgentCoreInstruction(agentCoreDir)
 
 	// 定义了主 Agent
 	deepAgent, err := deep.New(ctx, &deep.Config{
 		Name:        "ExcelAgent",
 		Description: "an agent for excel task",
 		ChatModel:   cm,
+		Instruction: agentCoreInstruction,
 		// 注册子 Agent
 		SubAgents: subAgents,
 		ToolsConfig: adk.ToolsConfig{
@@ -337,6 +451,10 @@ func newExcelAgent(ctx context.Context) (adk.Agent, error) {
 				Tools: []tool.BaseTool{
 					tools.NewWrapTool(tools.NewReadFileTool(operator), nil, nil),
 					tools.NewWrapTool(tools.NewTreeTool(operator), nil, nil),
+					// Self-Improvement 工具：日记写入、记忆编辑、日记搜索
+					tools.NewDiaryWriteTool(agentCoreDir),
+					tools.NewMemoryEditTool(agentCoreDir),
+					tools.NewDiarySearchTool(agentCoreDir),
 				},
 			},
 		},
@@ -424,7 +542,7 @@ func resolveSkillsDir() (string, bool) {
 	skillsDir := strings.TrimSpace(os.Getenv("EINO_EXT_SKILLS_DIR"))
 	if skillsDir == "" {
 		// 默认使用 chatwitheino 项目下的 eino-ext skills
-		skillsDir = "/Users/zes/work/eino-examples/quickstart/chatwitheino/skills/eino-ext"
+		skillsDir = "/Users/zes/work/eino-examples/adk/multiagent/deep/skills"
 	}
 	if absDir, err := filepath.Abs(skillsDir); err == nil {
 		skillsDir = absDir
